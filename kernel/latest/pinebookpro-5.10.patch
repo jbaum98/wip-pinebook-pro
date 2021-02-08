@@ -1,22 +1,22 @@
-From ce1fd4c30259779c058c52c1471f6fdb718fd3a5 Mon Sep 17 00:00:00 2001
+From c223fa5f3cded17156fb781c1861a92349c4c5be Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:01:59 +0200
-Subject: [PATCH 01/26] leds: Add support for inverted LED triggers
+Subject: [PATCH 01/25] leds: Add support for inverted LED triggers
 
 Needs to be changed for upstream, invert via sysfs not trigger duplication
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
 ---
  drivers/leds/led-core.c     |   1 +
- drivers/leds/led-triggers.c | 148 +++++++++++++++++++++++++++---------
+ drivers/leds/led-triggers.c | 149 +++++++++++++++++++++++++++---------
  include/linux/leds.h        |   1 +
- 3 files changed, 112 insertions(+), 38 deletions(-)
+ 3 files changed, 113 insertions(+), 38 deletions(-)
 
 diff --git a/drivers/leds/led-core.c b/drivers/leds/led-core.c
-index f1f718dbe0f8..f174611e869f 100644
+index c4e780bdb3..3973676d6f 100644
 --- a/drivers/leds/led-core.c
 +++ b/drivers/leds/led-core.c
-@@ -175,6 +175,7 @@ static void led_blink_setup(struct led_classdev *led_cdev,
+@@ -177,6 +177,7 @@ static void led_blink_setup(struct led_classdev *led_cdev,
  		     unsigned long *delay_off)
  {
  	if (!test_bit(LED_BLINK_ONESHOT, &led_cdev->work_flags) &&
@@ -25,13 +25,21 @@ index f1f718dbe0f8..f174611e869f 100644
  	    !led_cdev->blink_set(led_cdev, delay_on, delay_off))
  		return;
 diff --git a/drivers/leds/led-triggers.c b/drivers/leds/led-triggers.c
-index 79e30d2cb7a5..c40c58c6e345 100644
+index 91da90cfb1..7f2898a0e1 100644
 --- a/drivers/leds/led-triggers.c
 +++ b/drivers/leds/led-triggers.c
-@@ -27,14 +27,80 @@ LIST_HEAD(trigger_list);
+@@ -27,20 +27,89 @@ LIST_HEAD(trigger_list);
  
   /* Used by LED Class */
  
++
+ static inline bool
+ trigger_relevant(struct led_classdev *led_cdev, struct led_trigger *trig)
+ {
+ 	return !trig->trigger_type || trig->trigger_type == led_cdev->trigger_type;
+ }
+ 
++
 +#define TRIGGER_INVERT_SUFFIX "-inverted"
 +
 +/*
@@ -73,7 +81,8 @@ index 79e30d2cb7a5..c40c58c6e345 100644
 +	list_for_each_entry(trig, &trigger_list, next_trig) {
 +		/* Compare trigger name without inversion suffix */
 +		if (strlen(trig->name) == len &&
-+		    !strncmp(trigname, trig->name, len)) {
++		    !strncmp(trigname, trig->name, len) &&
++		    trigger_relevant(led_cdev, trig)) {
 +			if (lock)
 +				down_write(&led_cdev->trigger_lock);
 +			led_trigger_set(led_cdev, trig);
@@ -110,13 +119,13 @@ index 79e30d2cb7a5..c40c58c6e345 100644
  
  	mutex_lock(&led_cdev->led_access);
  
-@@ -48,20 +114,10 @@ ssize_t led_trigger_write(struct file *filp, struct kobject *kobj,
+@@ -54,20 +123,10 @@ ssize_t led_trigger_write(struct file *filp, struct kobject *kobj,
  		goto unlock;
  	}
  
 -	down_read(&triggers_list_lock);
 -	list_for_each_entry(trig, &trigger_list, next_trig) {
--		if (sysfs_streq(buf, trig->name)) {
+-		if (sysfs_streq(buf, trig->name) && trigger_relevant(led_cdev, trig)) {
 -			down_write(&led_cdev->trigger_lock);
 -			led_trigger_set(led_cdev, trig);
 -			up_write(&led_cdev->trigger_lock);
@@ -135,15 +144,18 @@ index 79e30d2cb7a5..c40c58c6e345 100644
  
  unlock:
  	mutex_unlock(&led_cdev->led_access);
-@@ -93,12 +149,22 @@ static int led_trigger_format(char *buf, size_t size,
+@@ -99,16 +158,25 @@ static int led_trigger_format(char *buf, size_t size,
  				       led_cdev->trigger ? "none" : "[none]");
  
  	list_for_each_entry(trig, &trigger_list, next_trig) {
--		bool hit = led_cdev->trigger &&
--			!strcmp(led_cdev->trigger->name, trig->name);
+-		bool hit;
 +		bool hit = led_cdev->trigger == trig;
 +		bool inverted = led_cdev->flags & LED_INVERT_TRIGGER;
-+
+ 
+ 		if (!trigger_relevant(led_cdev, trig))
+ 			continue;
+ 
+-		hit = led_cdev->trigger && !strcmp(led_cdev->trigger->name, trig->name);
 +		/* print non-inverted trigger */
 +		len += led_trigger_snprintf(buf + len, size - len,
 +					    " %s%s%s",
@@ -162,7 +174,7 @@ index 79e30d2cb7a5..c40c58c6e345 100644
  	}
  
  	len += led_trigger_snprintf(buf + len, size - len, "\n");
-@@ -235,21 +301,15 @@ EXPORT_SYMBOL_GPL(led_trigger_remove);
+@@ -245,22 +313,15 @@ EXPORT_SYMBOL_GPL(led_trigger_remove);
  
  void led_trigger_set_default(struct led_classdev *led_cdev)
  {
@@ -175,7 +187,8 @@ index 79e30d2cb7a5..c40c58c6e345 100644
  	down_read(&triggers_list_lock);
 -	down_write(&led_cdev->trigger_lock);
 -	list_for_each_entry(trig, &trigger_list, next_trig) {
--		if (!strcmp(led_cdev->default_trigger, trig->name)) {
+-		if (!strcmp(led_cdev->default_trigger, trig->name) &&
+-		    trigger_relevant(led_cdev, trig)) {
 -			led_cdev->flags |= LED_INIT_DEFAULT_TRIGGER;
 -			led_trigger_set(led_cdev, trig);
 -			break;
@@ -188,18 +201,18 @@ index 79e30d2cb7a5..c40c58c6e345 100644
  	up_read(&triggers_list_lock);
  }
  EXPORT_SYMBOL_GPL(led_trigger_set_default);
-@@ -292,11 +352,14 @@ int led_trigger_register(struct led_trigger *trig)
+@@ -305,12 +366,15 @@ int led_trigger_register(struct led_trigger *trig)
  	/* Register with any LEDs that have this as a default trigger */
  	down_read(&leds_list_lock);
  	list_for_each_entry(led_cdev, &leds_list, node) {
 +		bool found;
 +
  		down_write(&led_cdev->trigger_lock);
--		if (!led_cdev->trigger && led_cdev->default_trigger &&
--			    !strcmp(led_cdev->default_trigger, trig->name)) {
+ 		if (!led_cdev->trigger && led_cdev->default_trigger &&
+-		    !strcmp(led_cdev->default_trigger, trig->name) &&
+ 		    trigger_relevant(led_cdev, trig)) {
 -			led_cdev->flags |= LED_INIT_DEFAULT_TRIGGER;
 -			led_trigger_set(led_cdev, trig);
-+		if (!led_cdev->trigger && led_cdev->default_trigger) {
 +			found = !led_trigger_set_str_unlocked(led_cdev,
 +					led_cdev->default_trigger);
 +			if (found)
@@ -207,7 +220,7 @@ index 79e30d2cb7a5..c40c58c6e345 100644
  		}
  		up_write(&led_cdev->trigger_lock);
  	}
-@@ -369,8 +432,14 @@ void led_trigger_event(struct led_trigger *trig,
+@@ -383,8 +447,14 @@ void led_trigger_event(struct led_trigger *trig,
  		return;
  
  	read_lock(&trig->leddev_list_lock);
@@ -224,7 +237,7 @@ index 79e30d2cb7a5..c40c58c6e345 100644
  	read_unlock(&trig->leddev_list_lock);
  }
  EXPORT_SYMBOL_GPL(led_trigger_event);
-@@ -388,10 +457,13 @@ static void led_trigger_blink_setup(struct led_trigger *trig,
+@@ -402,10 +472,13 @@ static void led_trigger_blink_setup(struct led_trigger *trig,
  
  	read_lock(&trig->leddev_list_lock);
  	list_for_each_entry(led_cdev, &trig->led_cdevs, trig_list) {
@@ -242,10 +255,10 @@ index 79e30d2cb7a5..c40c58c6e345 100644
  	}
  	read_unlock(&trig->leddev_list_lock);
 diff --git a/include/linux/leds.h b/include/linux/leds.h
-index 2451962d1ec5..c15298502b39 100644
+index 6a8d6409c9..9cbf42cf08 100644
 --- a/include/linux/leds.h
 +++ b/include/linux/leds.h
-@@ -75,6 +75,7 @@ struct led_classdev {
+@@ -79,6 +79,7 @@ struct led_classdev {
  #define LED_BRIGHT_HW_CHANGED	BIT(21)
  #define LED_RETAIN_AT_SHUTDOWN	BIT(22)
  #define LED_INIT_DEFAULT_TRIGGER BIT(23)
@@ -254,13 +267,13 @@ index 2451962d1ec5..c15298502b39 100644
  	/* set_brightness_work / blink_timer flags, atomic, private. */
  	unsigned long		work_flags;
 -- 
-2.25.4
+2.29.2
 
 
-From 647fe78ac65a505aefff3825760185d66ada0da2 Mon Sep 17 00:00:00 2001
+From b6bf2fae45b6b6a7ffd44dcbd5aff5b22ebd3f35 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:06:20 +0200
-Subject: [PATCH 02/26] soc: rockchip: Add rockchip suspend mode driver
+Subject: [PATCH 02/25] soc: rockchip: Add rockchip suspend mode driver
 
 Code gore, do not mainline. This belongs in ATF
 
@@ -278,7 +291,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
 
 diff --git a/Documentation/devicetree/bindings/soc/rockchip/rockchip-pm-config.txt b/Documentation/devicetree/bindings/soc/rockchip/rockchip-pm-config.txt
 new file mode 100644
-index 000000000000..a8fd70f17597
+index 0000000000..a8fd70f175
 --- /dev/null
 +++ b/Documentation/devicetree/bindings/soc/rockchip/rockchip-pm-config.txt
 @@ -0,0 +1,39 @@
@@ -322,10 +335,10 @@ index 000000000000..a8fd70f17597
 +		>;
 +	};
 diff --git a/drivers/soc/rockchip/Kconfig b/drivers/soc/rockchip/Kconfig
-index b71b73bf5fc5..bfadbecd0df8 100644
+index 2c13bf4dd5..f403ab803b 100644
 --- a/drivers/soc/rockchip/Kconfig
 +++ b/drivers/soc/rockchip/Kconfig
-@@ -26,4 +26,10 @@ config ROCKCHIP_PM_DOMAINS
+@@ -34,4 +34,10 @@ config ROCKCHIP_PM_DOMAINS
  
            If unsure, say N.
  
@@ -337,17 +350,17 @@ index b71b73bf5fc5..bfadbecd0df8 100644
 +
  endif
 diff --git a/drivers/soc/rockchip/Makefile b/drivers/soc/rockchip/Makefile
-index afca0a4c4b72..a15c0a395a33 100644
+index 875032f734..7aa3d5d1b3 100644
 --- a/drivers/soc/rockchip/Makefile
 +++ b/drivers/soc/rockchip/Makefile
-@@ -4,3 +4,4 @@
- #
+@@ -5,3 +5,4 @@
  obj-$(CONFIG_ROCKCHIP_GRF) += grf.o
+ obj-$(CONFIG_ROCKCHIP_IODOMAIN) += io-domain.o
  obj-$(CONFIG_ROCKCHIP_PM_DOMAINS) += pm_domains.o
 +obj-$(CONFIG_ROCKCHIP_SUSPEND_MODE) += rockchip_pm_config.o
 diff --git a/drivers/soc/rockchip/rockchip_pm_config.c b/drivers/soc/rockchip/rockchip_pm_config.c
 new file mode 100644
-index 000000000000..43b2e0f33343
+index 0000000000..43b2e0f333
 --- /dev/null
 +++ b/drivers/soc/rockchip/rockchip_pm_config.c
 @@ -0,0 +1,212 @@
@@ -565,7 +578,7 @@ index 000000000000..43b2e0f33343
 +subsys_initcall(rockchip_pm_drv_register);
 diff --git a/include/dt-bindings/suspend/rockchip-rk3399.h b/include/dt-bindings/suspend/rockchip-rk3399.h
 new file mode 100644
-index 000000000000..0cccd6430ef6
+index 0000000000..0cccd6430e
 --- /dev/null
 +++ b/include/dt-bindings/suspend/rockchip-rk3399.h
 @@ -0,0 +1,60 @@
@@ -630,13 +643,13 @@ index 000000000000..0cccd6430ef6
 +
 +#endif
 -- 
-2.25.4
+2.29.2
 
 
-From 6d5c59818c17acdb798be77487c99b5f2dd26be0 Mon Sep 17 00:00:00 2001
+From 824a740372a795599a35731027b528610019be28 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:11:05 +0200
-Subject: [PATCH 03/26] firmware: Add Rockchip SIP driver
+Subject: [PATCH 03/25] firmware: Add Rockchip SIP driver
 
 Used exclusively for suspend signaling. Drop for mainline and
 use PSCI
@@ -652,10 +665,10 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  create mode 100644 include/linux/rockchip/rockchip_sip.h
 
 diff --git a/drivers/firmware/Kconfig b/drivers/firmware/Kconfig
-index fbd785dd0513..da0c3183e48a 100644
+index 3315e3c215..1dfa18dde0 100644
 --- a/drivers/firmware/Kconfig
 +++ b/drivers/firmware/Kconfig
-@@ -251,6 +251,13 @@ config QCOM_SCM_DOWNLOAD_MODE_DEFAULT
+@@ -250,6 +250,13 @@ config QCOM_SCM_DOWNLOAD_MODE_DEFAULT
  
  	  Say Y here to enable "download mode" by default.
  
@@ -670,7 +683,7 @@ index fbd785dd0513..da0c3183e48a 100644
  	tristate "TI System Control Interface (TISCI) Message Protocol"
  	depends on TI_MESSAGE_MANAGER
 diff --git a/drivers/firmware/Makefile b/drivers/firmware/Makefile
-index 99510be9f5ed..5533d2ffae54 100644
+index 5e013b6a36..85c40483e5 100644
 --- a/drivers/firmware/Makefile
 +++ b/drivers/firmware/Makefile
 @@ -28,6 +28,7 @@ obj-y				+= meson/
@@ -683,7 +696,7 @@ index 99510be9f5ed..5533d2ffae54 100644
  obj-y				+= smccc/
 diff --git a/drivers/firmware/rockchip_sip.c b/drivers/firmware/rockchip_sip.c
 new file mode 100644
-index 000000000000..6ed780c587e1
+index 0000000000..6ed780c587
 --- /dev/null
 +++ b/drivers/firmware/rockchip_sip.c
 @@ -0,0 +1,262 @@
@@ -951,7 +964,7 @@ index 000000000000..6ed780c587e1
 +}
 diff --git a/include/linux/rockchip/rockchip_sip.h b/include/linux/rockchip/rockchip_sip.h
 new file mode 100644
-index 000000000000..b19f64ede981
+index 0000000000..b19f64ede9
 --- /dev/null
 +++ b/include/linux/rockchip/rockchip_sip.h
 @@ -0,0 +1,149 @@
@@ -1105,13 +1118,13 @@ index 000000000000..b19f64ede981
 +
 +#endif
 -- 
-2.25.4
+2.29.2
 
 
-From 9ef294895cf135238269e12457f104a42397b59b Mon Sep 17 00:00:00 2001
+From 90a117ec260f54078aabcf2c1cde72f4425116ba Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:12:56 +0200
-Subject: [PATCH 04/26] tty: serdev: support shutdown op
+Subject: [PATCH 04/25] tty: serdev: support shutdown op
 
 Allow serdev drivers to register a shutdown handler
 
@@ -1122,7 +1135,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  2 files changed, 12 insertions(+)
 
 diff --git a/drivers/tty/serdev/core.c b/drivers/tty/serdev/core.c
-index c5f0d936b003..37e45c356540 100644
+index c5f0d936b0..37e45c3565 100644
 --- a/drivers/tty/serdev/core.c
 +++ b/drivers/tty/serdev/core.c
 @@ -432,11 +432,22 @@ static int serdev_drv_remove(struct device *dev)
@@ -1149,7 +1162,7 @@ index c5f0d936b003..37e45c356540 100644
  
  /**
 diff --git a/include/linux/serdev.h b/include/linux/serdev.h
-index 9f14f9c12ec4..94050561325c 100644
+index 9f14f9c12e..9405056132 100644
 --- a/include/linux/serdev.h
 +++ b/include/linux/serdev.h
 @@ -63,6 +63,7 @@ struct serdev_device_driver {
@@ -1161,13 +1174,13 @@ index 9f14f9c12ec4..94050561325c 100644
  
  static inline struct serdev_device_driver *to_serdev_device_driver(struct device_driver *d)
 -- 
-2.25.4
+2.29.2
 
 
-From e31835178104ce7e82d2a573f80ea953bfb3012c Mon Sep 17 00:00:00 2001
+From 4381cb3400bd61288d2122f3eb74711963885323 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:14:06 +0200
-Subject: [PATCH 05/26] bluetooth: hci_serdev: Clear registered bit on
+Subject: [PATCH 05/25] bluetooth: hci_serdev: Clear registered bit on
  unregister
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
@@ -1176,25 +1189,25 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 2 insertions(+)
 
 diff --git a/drivers/bluetooth/hci_serdev.c b/drivers/bluetooth/hci_serdev.c
-index 599855e4c57c..1ef9b965a9a0 100644
+index ef96ad06fa..95c723c0ea 100644
 --- a/drivers/bluetooth/hci_serdev.c
 +++ b/drivers/bluetooth/hci_serdev.c
-@@ -362,5 +362,7 @@ void hci_uart_unregister_device(struct hci_uart *hu)
- 
- 	hu->proto->close(hu);
- 	serdev_device_close(hu->serdev);
+@@ -395,5 +395,7 @@ void hci_uart_unregister_device(struct hci_uart *hu)
+ 		clear_bit(HCI_UART_PROTO_READY, &hu->flags);
+ 		serdev_device_close(hu->serdev);
+ 	}
 +
 +	clear_bit(HCI_UART_REGISTERED, &hu->flags);
  }
  EXPORT_SYMBOL_GPL(hci_uart_unregister_device);
 -- 
-2.25.4
+2.29.2
 
 
-From 05f517f27ef921bace9197ed89f9a65108c3fddf Mon Sep 17 00:00:00 2001
+From 4065c5018d7d4fc7d6ea51056a954f23320688ca Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:15:08 +0200
-Subject: [PATCH 06/26] bluetooth: hci_bcm: disable power on shutdown
+Subject: [PATCH 06/25] bluetooth: hci_bcm: disable power on shutdown
 
 Firmware behaves wonky when not power cycled over reboots
 
@@ -1204,7 +1217,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 18 insertions(+)
 
 diff --git a/drivers/bluetooth/hci_bcm.c b/drivers/bluetooth/hci_bcm.c
-index 8ea5ca8d71d6..6d5871992f79 100644
+index 8ea5ca8d71..6d5871992f 100644
 --- a/drivers/bluetooth/hci_bcm.c
 +++ b/drivers/bluetooth/hci_bcm.c
 @@ -1469,6 +1469,23 @@ static void bcm_serdev_remove(struct serdev_device *serdev)
@@ -1240,13 +1253,13 @@ index 8ea5ca8d71d6..6d5871992f79 100644
  		.name = "hci_uart_bcm",
  		.of_match_table = of_match_ptr(bcm_bluetooth_of_match),
 -- 
-2.25.4
+2.29.2
 
 
-From bd0386f85726b943149d6fa730fd8ec8bcd6f854 Mon Sep 17 00:00:00 2001
+From f6419edc62979c1e67202b5dc10abd7b22bdedcf Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:16:52 +0200
-Subject: [PATCH 07/26] mmc: core: pwrseq_simple: disable mmc power on shutdown
+Subject: [PATCH 07/25] mmc: core: pwrseq_simple: disable mmc power on shutdown
 
 Fix for Broadcom SDIO WiFi modules. They misbehave if reinitialized
 without a power cycle.
@@ -1257,7 +1270,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 16 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/mmc/core/pwrseq_simple.c b/drivers/mmc/core/pwrseq_simple.c
-index ea4d3670560e..38fe7e29aba6 100644
+index ea4d367056..38fe7e29ab 100644
 --- a/drivers/mmc/core/pwrseq_simple.c
 +++ b/drivers/mmc/core/pwrseq_simple.c
 @@ -80,10 +80,8 @@ static void mmc_pwrseq_simple_post_power_on(struct mmc_host *host)
@@ -1305,13 +1318,13 @@ index ea4d3670560e..38fe7e29aba6 100644
  		.name = "pwrseq_simple",
  		.of_match_table = mmc_pwrseq_simple_of_match,
 -- 
-2.25.4
+2.29.2
 
 
-From 7aec49cb387e9f5ad51e8e0d3b01376a416d4ff2 Mon Sep 17 00:00:00 2001
+From e1142219ae1f0370600b8afd5a80ee7f1423145d Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:19:31 +0200
-Subject: [PATCH 08/26] regulator: core: add generic suspend states support
+Subject: [PATCH 08/25] regulator: core: add generic suspend states support
 
 This commit adds genric suspend support for regualtors without
 explicit suspend ops.
@@ -1320,15 +1333,15 @@ procedure might be unsafe.
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
 ---
- drivers/regulator/core.c         | 48 +++++++++++++++++++++++++++++---
- include/linux/regulator/driver.h |  3 ++
- 2 files changed, 47 insertions(+), 4 deletions(-)
+ drivers/regulator/core.c         | 46 +++++++++++++++++++++++++++++---
+ include/linux/regulator/driver.h |  3 +++
+ 2 files changed, 46 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/regulator/core.c b/drivers/regulator/core.c
-index 03154f5b939f..2354ec5072a8 100644
+index 42bbd99a36..72fb6f417c 100644
 --- a/drivers/regulator/core.c
 +++ b/drivers/regulator/core.c
-@@ -5286,6 +5286,14 @@ void regulator_unregister(struct regulator_dev *rdev)
+@@ -5411,6 +5411,14 @@ void regulator_unregister(struct regulator_dev *rdev)
  EXPORT_SYMBOL_GPL(regulator_unregister);
  
  #ifdef CONFIG_SUSPEND
@@ -1343,15 +1356,10 @@ index 03154f5b939f..2354ec5072a8 100644
  /**
   * regulator_suspend - prepare regulators for system wide suspend
   * @dev: ``&struct device`` pointer that is passed to _regulator_suspend()
-@@ -5296,10 +5304,33 @@ static int regulator_suspend(struct device *dev)
- {
- 	struct regulator_dev *rdev = dev_to_rdev(dev);
- 	suspend_state_t state = pm_suspend_target_state;
-+	struct regulator_state *rstate;
- 	int ret;
+@@ -5430,6 +5438,28 @@ static int regulator_suspend(struct device *dev)
  
  	regulator_lock(rdev);
- 	ret = suspend_set_state(rdev, state);
+ 	ret = __suspend_set_state(rdev, rstate);
 +	if (ret) {
 +		goto out;
 +	}
@@ -1377,13 +1385,12 @@ index 03154f5b939f..2354ec5072a8 100644
  	regulator_unlock(rdev);
  
  	return ret;
-@@ -5318,10 +5349,19 @@ static int regulator_resume(struct device *dev)
+@@ -5452,9 +5482,19 @@ static int regulator_resume(struct device *dev)
  
  	regulator_lock(rdev);
  
--	if (rdev->desc->ops->resume &&
--	    (rstate->enabled == ENABLE_IN_SUSPEND ||
--	     rstate->enabled == DISABLE_IN_SUSPEND))
+-	if (rstate->enabled == ENABLE_IN_SUSPEND ||
+-	    rstate->enabled == DISABLE_IN_SUSPEND)
 -		ret = rdev->desc->ops->resume(rdev);
 +	if (rstate->enabled == ENABLE_IN_SUSPEND || rstate->enabled == DISABLE_IN_SUSPEND) {
 +		if (rdev->desc->ops->resume) {
@@ -1402,10 +1409,10 @@ index 03154f5b939f..2354ec5072a8 100644
  	regulator_unlock(rdev);
  
 diff --git a/include/linux/regulator/driver.h b/include/linux/regulator/driver.h
-index 7eb9fea8e482..077a935b19c5 100644
+index 11cade7372..8a67654b59 100644
 --- a/include/linux/regulator/driver.h
 +++ b/include/linux/regulator/driver.h
-@@ -465,6 +465,9 @@ struct regulator_dev {
+@@ -470,6 +470,9 @@ struct regulator_dev {
  
  	/* time when this regulator was disabled last time */
  	unsigned long last_off_jiffy;
@@ -1416,13 +1423,13 @@ index 7eb9fea8e482..077a935b19c5 100644
  
  struct regulator_dev *
 -- 
-2.25.4
+2.29.2
 
 
-From dd4206695a4135f6a3a3b228f33663bfa1987e27 Mon Sep 17 00:00:00 2001
+From e01fc4ff0bbe2ed3ba9076905bc1e9570917f1bf Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:22:09 +0200
-Subject: [PATCH 09/26] usb: typec: bus: Catch crash due to partner NULL value
+Subject: [PATCH 09/25] usb: typec: bus: Catch crash due to partner NULL value
 
 Think this has been fixed upstream, have not seen it happen for ages.
 Drop on next rebase.
@@ -1433,7 +1440,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 7 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/usb/typec/bus.c b/drivers/usb/typec/bus.c
-index e8ddb81cb6df..1d0265f46441 100644
+index e8ddb81cb6..1d0265f464 100644
 --- a/drivers/usb/typec/bus.c
 +++ b/drivers/usb/typec/bus.c
 @@ -154,8 +154,14 @@ EXPORT_SYMBOL_GPL(typec_altmode_exit);
@@ -1453,13 +1460,13 @@ index e8ddb81cb6df..1d0265f46441 100644
  		pdev->ops->attention(pdev, vdo);
  }
 -- 
-2.25.4
+2.29.2
 
 
-From 34dd01fcb581d221aacb960a9e3a3030429c6638 Mon Sep 17 00:00:00 2001
+From b0452434e75ecf257bc2ea9a5eb86be68bb56f71 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:23:54 +0200
-Subject: [PATCH 10/26] usb: typec: tcpm: add hacky generic altmode support
+Subject: [PATCH 10/25] usb: typec: tcpm: add hacky generic altmode support
 
 This is a hack and it is based on extcon. Do not try to mainline
 unless you are in need for some retroactive abortion by the
@@ -1467,26 +1474,25 @@ maintainers.
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
 ---
- drivers/usb/typec/tcpm/tcpm.c | 140 +++++++++++++++++++++++++++++++++-
- 1 file changed, 139 insertions(+), 1 deletion(-)
+ drivers/usb/typec/tcpm/tcpm.c | 139 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 138 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/usb/typec/tcpm/tcpm.c b/drivers/usb/typec/tcpm/tcpm.c
-index 82b19ebd7838..9858df11590b 100644
+index a6fae1f865..2908771f4d 100644
 --- a/drivers/usb/typec/tcpm/tcpm.c
 +++ b/drivers/usb/typec/tcpm/tcpm.c
-@@ -8,6 +8,7 @@
- #include <linux/completion.h>
+@@ -9,6 +9,7 @@
  #include <linux/debugfs.h>
  #include <linux/device.h>
+ #include <linux/hrtimer.h>
 +#include <linux/extcon-provider.h>
  #include <linux/jiffies.h>
  #include <linux/kernel.h>
- #include <linux/module.h>
-@@ -322,6 +323,12 @@ struct tcpm_port {
- 	/* port belongs to a self powered device */
- 	bool self_powered;
+ #include <linux/kthread.h>
+@@ -369,6 +370,11 @@ struct tcpm_port {
+ 	/* Sink caps have been queried */
+ 	bool sink_cap_done;
  
-+
 +#ifdef CONFIG_EXTCON
 +	struct extcon_dev *extcon;
 +	unsigned int *extcon_cables;
@@ -1495,7 +1501,7 @@ index 82b19ebd7838..9858df11590b 100644
  #ifdef CONFIG_DEBUG_FS
  	struct dentry *dentry;
  	struct mutex logbuffer_lock;	/* log buffer access lock */
-@@ -607,6 +614,35 @@ static void tcpm_debugfs_exit(const struct tcpm_port *port) { }
+@@ -654,6 +660,35 @@ static void tcpm_debugfs_exit(const struct tcpm_port *port) { }
  
  #endif
  
@@ -1531,7 +1537,7 @@ index 82b19ebd7838..9858df11590b 100644
  static int tcpm_pd_transmit(struct tcpm_port *port,
  			    enum tcpm_transmit_type type,
  			    const struct pd_message *msg)
-@@ -834,6 +870,8 @@ static int tcpm_set_roles(struct tcpm_port *port, bool attached,
+@@ -881,6 +916,8 @@ static int tcpm_set_roles(struct tcpm_port *port, bool attached,
  	typec_set_data_role(port->typec_port, data);
  	typec_set_pwr_role(port->typec_port, role);
  
@@ -1540,26 +1546,26 @@ index 82b19ebd7838..9858df11590b 100644
  	return 0;
  }
  
-@@ -1044,7 +1082,7 @@ static void svdm_consume_modes(struct tcpm_port *port, const __le32 *payload,
+@@ -1132,7 +1169,7 @@ static void svdm_consume_modes(struct tcpm_port *port, const u32 *p, int cnt)
  		paltmode->mode = i;
- 		paltmode->vdo = le32_to_cpu(payload[i]);
+ 		paltmode->vdo = p[i];
  
 -		tcpm_log(port, " Alternate mode %d: SVID 0x%04x, VDO %d: 0x%08x",
 +		tcpm_log(port, "Alternate mode %d: SVID 0x%04x, VDO %d: 0x%08x",
  			 pmdata->altmodes, paltmode->svid,
  			 paltmode->mode, paltmode->vdo);
  
-@@ -1064,6 +1102,9 @@ static void tcpm_register_partner_altmodes(struct tcpm_port *port)
- 		if (!altmode)
- 			tcpm_log(port, "Failed to register partner SVID 0x%04x",
+@@ -1154,6 +1191,9 @@ static void tcpm_register_partner_altmodes(struct tcpm_port *port)
  				 modep->altmode_desc[i].svid);
+ 			altmode = NULL;
+ 		}
 +		else
 +			tcpm_log(port, "Registered altmode 0x%04x", modep->altmode_desc[i].svid);
 +
  		port->partner_altmode[i] = altmode;
  	}
  }
-@@ -1167,9 +1208,11 @@ static int tcpm_pd_svdm(struct tcpm_port *port, const __le32 *payload, int cnt,
+@@ -1249,9 +1289,11 @@ static int tcpm_pd_svdm(struct tcpm_port *port, struct typec_altmode *adev,
  			modep->svid_index++;
  			if (modep->svid_index < modep->nsvids) {
  				u16 svid = modep->svids[modep->svid_index];
@@ -1571,7 +1577,7 @@ index 82b19ebd7838..9858df11590b 100644
  				tcpm_register_partner_altmodes(port);
  			}
  			break;
-@@ -2693,6 +2736,7 @@ static int tcpm_src_attach(struct tcpm_port *port)
+@@ -2836,6 +2878,7 @@ out_disable_mux:
  static void tcpm_typec_disconnect(struct tcpm_port *port)
  {
  	if (port->connected) {
@@ -1579,8 +1585,8 @@ index 82b19ebd7838..9858df11590b 100644
  		typec_unregister_partner(port->partner);
  		port->partner = NULL;
  		port->connected = false;
-@@ -2750,6 +2794,8 @@ static void tcpm_detach(struct tcpm_port *port)
- 		port->hard_reset_count = 0;
+@@ -2902,6 +2945,8 @@ static void tcpm_detach(struct tcpm_port *port)
+ 	}
  
  	tcpm_reset_port(port);
 +
@@ -1588,7 +1594,7 @@ index 82b19ebd7838..9858df11590b 100644
  }
  
  static void tcpm_src_detach(struct tcpm_port *port)
-@@ -4424,6 +4470,64 @@ void tcpm_tcpc_reset(struct tcpm_port *port)
+@@ -4732,6 +4777,64 @@ void tcpm_tcpc_reset(struct tcpm_port *port)
  }
  EXPORT_SYMBOL_GPL(tcpm_tcpc_reset);
  
@@ -1653,7 +1659,7 @@ index 82b19ebd7838..9858df11590b 100644
  static int tcpm_fw_get_caps(struct tcpm_port *port,
  			    struct fwnode_handle *fwnode)
  {
-@@ -4434,6 +4538,23 @@ static int tcpm_fw_get_caps(struct tcpm_port *port,
+@@ -4742,6 +4845,23 @@ static int tcpm_fw_get_caps(struct tcpm_port *port,
  	if (!fwnode)
  		return -EINVAL;
  
@@ -1677,7 +1683,7 @@ index 82b19ebd7838..9858df11590b 100644
  	/* USB data support is optional */
  	ret = fwnode_property_read_string(fwnode, "data-role", &cap_str);
  	if (ret == 0) {
-@@ -4766,6 +4887,17 @@ struct tcpm_port *tcpm_register_port(struct device *dev, struct tcpc_dev *tcpc)
+@@ -5114,6 +5234,17 @@ struct tcpm_port *tcpm_register_port(struct device *dev, struct tcpc_dev *tcpc)
  		goto out_destroy_wq;
  
  	port->try_role = port->typec_caps.prefer_role;
@@ -1695,7 +1701,7 @@ index 82b19ebd7838..9858df11590b 100644
  
  	port->typec_caps.fwnode = tcpc->fwnode;
  	port->typec_caps.revision = 0x0120;	/* Type-C spec release 1.2 */
-@@ -4793,6 +4925,12 @@ struct tcpm_port *tcpm_register_port(struct device *dev, struct tcpc_dev *tcpc)
+@@ -5141,6 +5272,12 @@ struct tcpm_port *tcpm_register_port(struct device *dev, struct tcpc_dev *tcpc)
  		goto out_role_sw_put;
  	}
  
@@ -1709,13 +1715,13 @@ index 82b19ebd7838..9858df11590b 100644
  	tcpm_init(port);
  	mutex_unlock(&port->lock);
 -- 
-2.25.4
+2.29.2
 
 
-From 32dbd649f3251732cccf5b0bac2e0e2334a6e3bf Mon Sep 17 00:00:00 2001
+From db4e9ffdb985752ae3c3436ff86f8f376ae8fd22 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:25:32 +0200
-Subject: [PATCH 11/26] phy: rockchip: typec: Set extcon capabilities
+Subject: [PATCH 11/25] phy: rockchip: typec: Set extcon capabilities
 
 Do not mainline, hack.
 
@@ -1725,7 +1731,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 17 insertions(+)
 
 diff --git a/drivers/phy/rockchip/phy-rockchip-typec.c b/drivers/phy/rockchip/phy-rockchip-typec.c
-index 24563160197f..f5b497b4b97e 100644
+index 70a31251b2..5385bb4f0b 100644
 --- a/drivers/phy/rockchip/phy-rockchip-typec.c
 +++ b/drivers/phy/rockchip/phy-rockchip-typec.c
 @@ -40,6 +40,7 @@
@@ -1760,13 +1766,13 @@ index 24563160197f..f5b497b4b97e 100644
  
  	pm_runtime_enable(dev);
 -- 
-2.25.4
+2.29.2
 
 
-From ea5ed45f85ea1184106aa55d2eafa94a8ede38bf Mon Sep 17 00:00:00 2001
+From fd739ae47f9ea780a1e161a478e241df06eaff7e Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:26:27 +0200
-Subject: [PATCH 12/26] usb: typec: altmodes: displayport: Add hacky, generic
+Subject: [PATCH 12/25] usb: typec: altmodes: displayport: Add hacky, generic
  altmode detection
 
 Do not mainline, hack.
@@ -1777,7 +1783,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 52 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/usb/typec/altmodes/displayport.c b/drivers/usb/typec/altmodes/displayport.c
-index 0edfb89e04a8..c87cd57302cd 100644
+index e62e5e3da0..a3d03db476 100644
 --- a/drivers/usb/typec/altmodes/displayport.c
 +++ b/drivers/usb/typec/altmodes/displayport.c
 @@ -9,6 +9,8 @@
@@ -1789,7 +1795,7 @@ index 0edfb89e04a8..c87cd57302cd 100644
  #include <linux/mutex.h>
  #include <linux/module.h>
  #include <linux/usb/pd_vdo.h>
-@@ -134,15 +136,53 @@ static int dp_altmode_status_update(struct dp_altmode *dp)
+@@ -135,15 +137,53 @@ static int dp_altmode_status_update(struct dp_altmode *dp)
  	return ret;
  }
  
@@ -1844,7 +1850,7 @@ index 0edfb89e04a8..c87cd57302cd 100644
  
  	ret = dp_altmode_notify(dp);
  	if (ret)
-@@ -169,9 +209,11 @@ static int dp_altmode_configure_vdm(struct dp_altmode *dp, u32 conf)
+@@ -170,9 +210,11 @@ static int dp_altmode_configure_vdm(struct dp_altmode *dp, u32 conf)
  	if (ret) {
  		if (DP_CONF_GET_PIN_ASSIGN(dp->data.conf))
  			dp_altmode_notify(dp);
@@ -1857,7 +1863,7 @@ index 0edfb89e04a8..c87cd57302cd 100644
  	}
  
  	return ret;
-@@ -210,6 +252,8 @@ static void dp_altmode_work(struct work_struct *work)
+@@ -211,6 +253,8 @@ static void dp_altmode_work(struct work_struct *work)
  	case DP_STATE_EXIT:
  		if (typec_altmode_exit(dp->alt))
  			dev_err(&dp->alt->dev, "Exit Mode Failed!\n");
@@ -1866,7 +1872,7 @@ index 0edfb89e04a8..c87cd57302cd 100644
  		break;
  	default:
  		break;
-@@ -520,8 +564,13 @@ int dp_altmode_probe(struct typec_altmode *alt)
+@@ -521,8 +565,13 @@ int dp_altmode_probe(struct typec_altmode *alt)
  	if (!(DP_CAP_DFP_D_PIN_ASSIGN(port->vdo) &
  	      DP_CAP_UFP_D_PIN_ASSIGN(alt->vdo)) &&
  	    !(DP_CAP_UFP_D_PIN_ASSIGN(port->vdo) &
@@ -1882,13 +1888,13 @@ index 0edfb89e04a8..c87cd57302cd 100644
  	ret = sysfs_create_group(&alt->dev.kobj, &dp_altmode_group);
  	if (ret)
 -- 
-2.25.4
+2.29.2
 
 
-From ef76d3135780573232aa2d6c60858eec118c8a7a Mon Sep 17 00:00:00 2001
+From e9d07cf5d983a3b941e604ae4ba9d277929e0650 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:34:47 +0200
-Subject: [PATCH 13/26] sound: soc: codecs: es8316: Run micdetect only if jack
+Subject: [PATCH 13/25] sound: soc: codecs: es8316: Run micdetect only if jack
  status asserted
 
 Think this is (was?) required to prevent flapping of detection status on
@@ -1900,10 +1906,10 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/sound/soc/codecs/es8316.c b/sound/soc/codecs/es8316.c
-index 36eef1fb3d18..b303ebbd5f53 100644
+index bd5d230c5d..a2d8bf620b 100644
 --- a/sound/soc/codecs/es8316.c
 +++ b/sound/soc/codecs/es8316.c
-@@ -687,7 +687,7 @@ static void es8316_disable_jack_detect(struct snd_soc_component *component)
+@@ -688,7 +688,7 @@ static void es8316_disable_jack_detect(struct snd_soc_component *component)
  	snd_soc_component_update_bits(component, ES8316_GPIO_DEBOUNCE,
  				      ES8316_GPIO_ENABLE_INTERRUPT, 0);
  
@@ -1913,13 +1919,13 @@ index 36eef1fb3d18..b303ebbd5f53 100644
  		snd_soc_jack_report(es8316->jack, 0, SND_JACK_BTN_0);
  	}
 -- 
-2.25.4
+2.29.2
 
 
-From 8ce60b3793e5817da651ec57714e9fabde51b8cc Mon Sep 17 00:00:00 2001
+From edbf5d93dbd845faa4aa74fb8a7c5e76cf35ef0d Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:36:47 +0200
-Subject: [PATCH 14/26] ASoC: soc-jack.c: supported inverted jack detect GPIOs
+Subject: [PATCH 14/25] ASoC: soc-jack.c: supported inverted jack detect GPIOs
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
 ---
@@ -1927,7 +1933,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 4 insertions(+), 3 deletions(-)
 
 diff --git a/sound/soc/soc-jack.c b/sound/soc/soc-jack.c
-index 0f1820f36b4d..8d9d77814f33 100644
+index 0f1820f36b..8d9d77814f 100644
 --- a/sound/soc/soc-jack.c
 +++ b/sound/soc/soc-jack.c
 @@ -216,8 +216,6 @@ static void snd_soc_jack_gpio_detect(struct snd_soc_jack_gpio *gpio)
@@ -1959,13 +1965,13 @@ index 0f1820f36b4d..8d9d77814f33 100644
  			if (ret)
  				goto undo;
 -- 
-2.25.4
+2.29.2
 
 
-From dcb8c9e5ede133d3e90f6d2486f68fbbc890b8ba Mon Sep 17 00:00:00 2001
+From 8d1dd5bc0edbed8a69179ba88eaa8d8195f7c6df Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:38:03 +0200
-Subject: [PATCH 15/26] arm64: dts: rockchip: add default rk3399
+Subject: [PATCH 15/25] arm64: dts: rockchip: add default rk3399
  rockchip-suspend node
 
 Again this has no place in mainline. Should be handled by ATF
@@ -1977,7 +1983,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 24 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/rockchip/rk3399.dtsi b/arch/arm64/boot/dts/rockchip/rk3399.dtsi
-index 2581e9cc7a1d..4290bd1e69fb 100644
+index ada724b12f..c69d71544e 100644
 --- a/arch/arm64/boot/dts/rockchip/rk3399.dtsi
 +++ b/arch/arm64/boot/dts/rockchip/rk3399.dtsi
 @@ -9,6 +9,7 @@
@@ -1988,7 +1994,7 @@ index 2581e9cc7a1d..4290bd1e69fb 100644
  #include <dt-bindings/thermal/thermal.h>
  
  / {
-@@ -2664,4 +2665,27 @@
+@@ -2677,4 +2678,27 @@
  		};
  
  	};
@@ -2017,13 +2023,13 @@ index 2581e9cc7a1d..4290bd1e69fb 100644
 +	};
  };
 -- 
-2.25.4
+2.29.2
 
 
-From 91a2a2e359b97e8059e16df4e814cd76a5effb44 Mon Sep 17 00:00:00 2001
+From 966d28c3bac837260a1ab92772e8e21cb42ebec2 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:39:55 +0200
-Subject: [PATCH 16/26] arm64: dts: rockchip: enable earlycon
+Subject: [PATCH 16/25] arm64: dts: rockchip: enable earlycon
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
 ---
@@ -2031,7 +2037,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 1 insertion(+)
 
 diff --git a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-index cb0245d2226d..95aee364b170 100644
+index 06d48338c8..c1aad8f88b 100644
 --- a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 @@ -19,6 +19,7 @@
@@ -2043,13 +2049,13 @@ index cb0245d2226d..95aee364b170 100644
  	};
  
 -- 
-2.25.4
+2.29.2
 
 
-From 50f71a8bbc64a1e7d935b1927211500d526afab3 Mon Sep 17 00:00:00 2001
+From cde519324b4ef9c2e19b3c53b2402a3d9807dd98 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:40:31 +0200
-Subject: [PATCH 17/26] arm64: dts: rockchip: reserve memory for ATF rockchip
+Subject: [PATCH 17/25] arm64: dts: rockchip: reserve memory for ATF rockchip
  SIP
 
 Definitely not for mainline
@@ -2060,7 +2066,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 11 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-index 95aee364b170..fdc11f7b87dd 100644
+index c1aad8f88b..7595633d9a 100644
 --- a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 @@ -23,6 +23,11 @@
@@ -2075,7 +2081,7 @@ index 95aee364b170..fdc11f7b87dd 100644
  	backlight: edp-backlight {
  		compatible = "pwm-backlight";
  		power-supply = <&vcc_12v>;
-@@ -126,6 +131,12 @@
+@@ -133,6 +138,12 @@
  		reset-gpios = <&gpio0 RK_PB2 GPIO_ACTIVE_LOW>;
  	};
  
@@ -2089,70 +2095,13 @@ index 95aee364b170..fdc11f7b87dd 100644
  	es8316-sound {
  		compatible = "simple-audio-card";
 -- 
-2.25.4
+2.29.2
 
 
-From 711281737deced0f90a859a8cbb77e8757015962 Mon Sep 17 00:00:00 2001
-From: Tobias Schramm <t.schramm@manjaro.org>
-Date: Thu, 28 May 2020 14:41:41 +0200
-Subject: [PATCH 18/26] arm64: dts: rockchip: add cw2015 fuel gauge
-
-Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
----
- .../boot/dts/rockchip/rk3399-pinebook-pro.dts | 25 +++++++++++++++++++
- 1 file changed, 25 insertions(+)
-
-diff --git a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-index fdc11f7b87dd..aed6426273c0 100644
---- a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-+++ b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-@@ -34,6 +34,13 @@
- 		pwms = <&pwm0 0 740740 0>;
- 	};
- 
-+	bat: battery {
-+		compatible = "simple-battery";
-+		charge-full-design-microamp-hours = <9800000>;
-+		voltage-max-design-microvolt = <4350000>;
-+		voltage-min-design-microvolt = <3000000>;
-+	};
-+
- 	edp_panel: edp-panel {
- 		compatible = "boe,nv140fhmn49";
- 		backlight = <&backlight>;
-@@ -753,6 +760,24 @@
- 			};
- 		};
- 	};
-+
-+	cw2015@62 {
-+		compatible = "cellwise,cw2015";
-+		reg = <0x62>;
-+		cellwise,battery-profile = /bits/ 8 <
-+			0x17 0x67 0x80 0x73 0x6E 0x6C 0x6B 0x63
-+			0x77 0x51 0x5C 0x58 0x50 0x4C 0x48 0x36
-+			0x15 0x0C 0x0C 0x19 0x5B 0x7D 0x6F 0x69
-+			0x69 0x5B 0x0C 0x29 0x20 0x40 0x52 0x59
-+			0x57 0x56 0x54 0x4F 0x3B 0x1F 0x7F 0x17
-+			0x06 0x1A 0x30 0x5A 0x85 0x93 0x96 0x2D
-+			0x48 0x77 0x9C 0xB3 0x80 0x52 0x94 0xCB
-+			0x2F 0x00 0x64 0xA5 0xB5 0x11 0xF0 0x11
-+		>;
-+		cellwise,monitor-interval-ms = <5000>;
-+		monitored-battery = <&bat>;
-+		power-supplies = <&mains_charger>, <&fusb0>;
-+	};
- };
- 
- &i2s1 {
--- 
-2.25.4
-
-
-From a0a431a31237cfd281a16ca0dd1ca31853fb1752 Mon Sep 17 00:00:00 2001
+From 9467d9dd3466af78a00a7c9dbdeea5252603e767 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:42:54 +0200
-Subject: [PATCH 19/26] arm64: dts: rockchip: use power led for disk-activity
+Subject: [PATCH 18/25] arm64: dts: rockchip: use power led for disk-activity
  indication
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
@@ -2161,7 +2110,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-index aed6426273c0..73af605d6175 100644
+index 7595633d9a..667eeeb019 100644
 --- a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 @@ -110,7 +110,8 @@
@@ -2175,13 +2124,13 @@ index aed6426273c0..73af605d6175 100644
  
  		red_led: led-1 {
 -- 
-2.25.4
+2.29.2
 
 
-From 8157899a63c0b4fb6ae334d0787508c42263b20b Mon Sep 17 00:00:00 2001
+From 43756ac8a7e63935843e95471a9557677cedcbe0 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:43:27 +0200
-Subject: [PATCH 20/26] arm64: dts: rockchip: add oficially unsupported 2GHz
+Subject: [PATCH 19/25] arm64: dts: rockchip: add oficially unsupported 2GHz
  opp
 
 No mainlining here.
@@ -2192,7 +2141,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 7 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-index 73af605d6175..f218c2a36434 100644
+index 667eeeb019..decb212e2d 100644
 --- a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 @@ -392,6 +392,13 @@
@@ -2210,13 +2159,13 @@ index 73af605d6175..f218c2a36434 100644
  	status = "okay";
  };
 -- 
-2.25.4
+2.29.2
 
 
-From ffae4f74bf4fe83cb43ca20c9585523851ddff50 Mon Sep 17 00:00:00 2001
+From 948d7ade0ddcf292b91d91cb8b6819a19ab3f604 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:44:15 +0200
-Subject: [PATCH 21/26] arm64: dts: rockchip: add typec extcon hack
+Subject: [PATCH 20/25] arm64: dts: rockchip: add typec extcon hack
 
 Not for mainline
 
@@ -2226,7 +2175,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 5 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-index f218c2a36434..950f3a7bb27a 100644
+index decb212e2d..37f967a894 100644
 --- a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 @@ -401,6 +401,7 @@
@@ -2256,13 +2205,13 @@ index f218c2a36434..950f3a7bb27a 100644
  };
  
 -- 
-2.25.4
+2.29.2
 
 
-From 10b301fd7ca16ea327fdc30dafdd0e39d9f0e745 Mon Sep 17 00:00:00 2001
+From a9fc4f85ab2c3a50a6378cef95d9e7681aec7696 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 14:44:40 +0200
-Subject: [PATCH 22/26] arm64: dts: rockchip: add rockchip-suspend node
+Subject: [PATCH 21/25] arm64: dts: rockchip: add rockchip-suspend node
 
 No mainline
 
@@ -2272,7 +2221,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 23 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-index 950f3a7bb27a..ef9c8daa74a7 100644
+index 37f967a894..c505c88b5d 100644
 --- a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 @@ -954,6 +954,29 @@
@@ -2306,13 +2255,13 @@ index 950f3a7bb27a..ef9c8daa74a7 100644
  	vref-supply = <&vcca1v8_s3>;
  	status = "okay";
 -- 
-2.25.4
+2.29.2
 
 
-From 936a9a224504a2497cec4fa331a1953fe6e4dfee Mon Sep 17 00:00:00 2001
+From a96d6f22342042e11f36bd622da3db9711f5f530 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Thu, 28 May 2020 15:20:15 +0200
-Subject: [PATCH 23/26] arm64: configs: add defconfig for Pinebook Pro
+Subject: [PATCH 22/25] arm64: configs: add defconfig for Pinebook Pro
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
 ---
@@ -2322,7 +2271,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
 
 diff --git a/arch/arm64/configs/pinebook_pro_defconfig b/arch/arm64/configs/pinebook_pro_defconfig
 new file mode 100644
-index 000000000000..bc7bcee200e4
+index 0000000000..bc7bcee200
 --- /dev/null
 +++ b/arch/arm64/configs/pinebook_pro_defconfig
 @@ -0,0 +1,3000 @@
@@ -5327,13 +5276,13 @@ index 000000000000..bc7bcee200e4
 +# CONFIG_FTRACE is not set
 +# CONFIG_RUNTIME_TESTING_MENU is not set
 -- 
-2.25.4
+2.29.2
 
 
-From d12d494c5ef4faaaf1ecd92d74692c9a01ce9801 Mon Sep 17 00:00:00 2001
+From a8f3e4ffe533f952a468cb8f3d067865bd58144f Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Sat, 6 Jun 2020 23:45:10 +0200
-Subject: [PATCH 24/26] arm64: dts: rockchip: setup USB type c port as dual
+Subject: [PATCH 23/25] arm64: dts: rockchip: setup USB type c port as dual
  data role
 
 Some chargers try to put the charged device into device data role.
@@ -5346,7 +5295,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
-index ef9c8daa74a7..3b2ef918d386 100644
+index c505c88b5d..d77dca5524 100644
 --- a/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3399-pinebook-pro.dts
 @@ -726,7 +726,7 @@
@@ -5359,13 +5308,13 @@ index ef9c8daa74a7..3b2ef918d386 100644
  			op-sink-microwatt = <1000000>;
  			power-role = "dual";
 -- 
-2.25.4
+2.29.2
 
 
-From f644f660a561538b622d26b2afc5374f4a240cee Mon Sep 17 00:00:00 2001
+From 5e442015e3f0d679d81c27c88ba0cbc1dcc9b0cd Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Tue, 16 Jun 2020 10:11:10 +0200
-Subject: [PATCH 25/26] arm64: configs: Update Pinbook Pro defconfig to
+Subject: [PATCH 24/25] arm64: configs: Update Pinbook Pro defconfig to
  v5.8-rc1
 
 ---
@@ -5373,7 +5322,7 @@ Subject: [PATCH 25/26] arm64: configs: Update Pinbook Pro defconfig to
  1 file changed, 16 insertions(+), 22 deletions(-)
 
 diff --git a/arch/arm64/configs/pinebook_pro_defconfig b/arch/arm64/configs/pinebook_pro_defconfig
-index bc7bcee200e4..2977cea49142 100644
+index bc7bcee200..2977cea491 100644
 --- a/arch/arm64/configs/pinebook_pro_defconfig
 +++ b/arch/arm64/configs/pinebook_pro_defconfig
 @@ -17,7 +17,6 @@ CONFIG_LOG_BUF_SHIFT=23
@@ -5524,13 +5473,13 @@ index bc7bcee200e4..2977cea49142 100644
  CONFIG_CRYPTO_LRW=m
  CONFIG_CRYPTO_OFB=m
 -- 
-2.25.4
+2.29.2
 
 
-From 57cc0e9636c160cbae5845cedf0d463e87a6023c Mon Sep 17 00:00:00 2001
+From c04087388bdb7d79d5202ffb91aa387e36901056 Mon Sep 17 00:00:00 2001
 From: Tobias Schramm <t.schramm@manjaro.org>
 Date: Tue, 16 Jun 2020 21:29:29 +0200
-Subject: [PATCH 26/26] soc: rockchip: Port rockchip_pm_config driver to Linux
+Subject: [PATCH 25/25] soc: rockchip: Port rockchip_pm_config driver to Linux
  5.8
 
 Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
@@ -5539,7 +5488,7 @@ Signed-off-by: Tobias Schramm <t.schramm@manjaro.org>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/drivers/soc/rockchip/rockchip_pm_config.c b/drivers/soc/rockchip/rockchip_pm_config.c
-index 43b2e0f33343..07a0ff9465d3 100644
+index 43b2e0f333..07a0ff9465 100644
 --- a/drivers/soc/rockchip/rockchip_pm_config.c
 +++ b/drivers/soc/rockchip/rockchip_pm_config.c
 @@ -99,7 +99,7 @@ static void rockchip_pm_virt_pwroff_prepare(void)
@@ -5552,5 +5501,5 @@ index 43b2e0f33343..07a0ff9465d3 100644
  		pr_err("Disable nonboot cpus failed!\n");
  		return;
 -- 
-2.25.4
+2.29.2
 

@@ -1,13 +1,13 @@
-{ pkgs, lib, linux_5_8, kernelPatches, ... } @ args:
+{ pkgs, lib, linux_5_10, kernelPatches, ... } @ args:
 
-linux_5_8.override({
+linux_5_10.override({
   kernelPatches = lib.lists.unique (kernelPatches ++ [
     pkgs.kernelPatches.bridge_stp_helper
     pkgs.kernelPatches.request_key_helper
     pkgs.kernelPatches.export_kernel_fpu_functions."5.3"
     {
-      name = "pinebookpro-5.8.patch";
-      patch = ./pinebookpro-5.8.patch;
+      name = "pinebookpro-5.10.patch";
+      patch = ./pinebookpro-5.10.patch;
     }
     {
       name = "0001-HACK-Revert-pwm-Read-initial-hardware-state-at-reque.patch";
